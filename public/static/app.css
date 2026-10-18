@@ -350,3 +350,155 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
 
 /* Buttons built from <label> (file pickers) inside forms keep button styling */
 .form label.btn { display: inline-flex; color: var(--ink); font-size: 13px; font-weight: 600; }
+
+/* State outlines */
+.state-label { display: none; pointer-events: none; }
+.state-labels-on .state-label { display: block; }
+.state-label span {
+  display: inline-block; transform: translate(-50%, -50%); white-space: nowrap;
+  font-family: var(--font-sign); font-weight: 700; font-size: 16px; color: #5b3f8c;
+  text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 6px #fff; opacity: .85;
+}
+.chip-btn { border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 500; }
+.chip-btn:hover { background: #d3dccf; }
+
+/* Trail sections */
+.crosshair, .crosshair .leaflet-interactive { cursor: crosshair !important; }
+.sections-head { font-weight: 600; margin: 14px 0 6px; font-size: 14px; }
+.section-row { border-top: 1px solid var(--line); padding: 10px 0; display: grid; gap: 8px; }
+.section-top { display: flex; align-items: center; gap: 8px; }
+.section-num {
+  flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--pine); color: #fff;
+  display: grid; place-items: center; font-size: 12px; font-weight: 600;
+}
+.form .section-label { flex: 1; min-width: 0; padding: 6px 9px; font-size: 14px; }
+.section-mi { flex: none; }
+.swatches { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.swatch-btn {
+  width: 26px; height: 26px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line);
+  cursor: pointer; padding: 0;
+}
+.swatch-btn.on { box-shadow: 0 0 0 2px var(--ink); }
+.swatch-btn.none { background: repeating-linear-gradient(45deg, #fff 0 4px, #d2d8cf 4px 8px); }
+.form .swatch-custom { width: 34px; height: 28px; padding: 1px; border: 1px solid var(--line); border-radius: var(--radius-s); background: #fff; }
+.section-actions { display: flex; gap: 14px; font-size: 13px; }
+.section-list { display: grid; }
+.section-item {
+  display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; text-align: left;
+  background: none; border: 0; border-top: 1px solid var(--line); padding: 8px 0; cursor: pointer; font: inherit;
+}
+.section-item:hover { background: #e4e8df; }
+.section-swatch { width: 22px; height: 6px; border-radius: 3px; }
+
+/* The app fills the screen; only the side panel scrolls */
+body.app-page { overflow: hidden; position: fixed; inset: 0; }
+
+/* ---------- Filters: 2 x 2 ---------- */
+.filter-row { grid-template-columns: 1fr 1fr; }
+
+/* ---------- Tabs badge / offline flag ---------- */
+.tabs button { position: relative; }
+.tab-badge {
+  display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 4px;
+  border-radius: 9px; background: var(--marker); color: var(--marker-ink); font-size: 11px; font-weight: 700; vertical-align: 1px;
+}
+#offline-flag {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 455;
+  background: var(--danger); color: #fff; padding: 6px 12px; border-radius: 99px; font-size: 13px; font-weight: 600;
+  box-shadow: 0 2px 8px rgba(20,30,25,.3); white-space: nowrap;
+}
+@media (max-width: 760px) { #offline-flag { top: 56px; } }
+
+/* ---------- Trails / Waypoints switch ---------- */
+.seg { display: grid; grid-template-columns: 1fr 1fr; background: #dfe4db; border-radius: var(--radius-m); padding: 3px; margin-bottom: 12px; }
+.seg button { border: 0; background: none; padding: 7px 8px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+.seg button.on { background: var(--card); box-shadow: 0 1px 3px rgba(20,30,25,.15); }
+.seg .muted { font-weight: 500; }
+
+/* ---------- Waypoints ---------- */
+.wp-icon {
+  display: inline-grid; place-items: center; flex: none; border-radius: 50%;
+  border: 2px solid #fff; box-shadow: 0 1px 4px rgba(20,30,25,.35); box-sizing: border-box;
+}
+.wp-marker { background: none; border: 0; }
+.wp-marker-big .wp-icon { box-shadow: 0 0 0 3px var(--marker), 0 2px 8px rgba(20,30,25,.4); }
+.trail-item.wp-item { grid-template-columns: 30px 1fr auto; align-items: center; }
+.kind-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.kind-chip {
+  display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); background: var(--card);
+  border-radius: 99px; padding: 3px 10px 3px 4px; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.kind-chip:first-child { padding-left: 10px; }
+.kind-chip.on { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); background: #fffbe8; }
+.kind-chip .wp-icon { border-width: 1px; box-shadow: none; }
+.kind-pick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.kind-pick label {
+  position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 2px;
+  background: #fff; border: 1px solid var(--line); border-radius: var(--radius-s); cursor: pointer;
+  color: var(--ink); font-weight: 500; font-size: 12px; text-align: center; line-height: 1.2;
+}
+.kind-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.kind-pick label:has(input:checked) { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); background: #fffbe8; }
+.kind-pick label:has(input:focus-visible) { outline: 3px solid var(--marker); }
+.wp-mini-list { display: grid; margin-bottom: 8px; }
+.wp-mini {
+  display: grid; grid-template-columns: 24px 1fr auto; gap: 10px; align-items: center; text-align: left;
+  background: none; border: 0; border-top: 1px solid var(--line); padding: 7px 0; cursor: pointer; font: inherit;
+}
+.wp-mini:hover { background: #e4e8df; }
+.wp-mini .wp-icon { border-width: 1px; }
+.coords { font-variant-numeric: tabular-nums; font-weight: 500; }
+
+/* ---------- Planned rides ---------- */
+.plan-card {
+  display: grid; grid-template-columns: 58px 1fr; gap: 12px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius-m); padding: 12px; margin-bottom: 10px;
+}
+.plan-card.past { background: transparent; }
+.plan-date {
+  align-self: start; text-align: center; border-radius: var(--radius-s); overflow: hidden; border: 1px solid var(--pine);
+}
+.plan-date span { display: block; background: var(--pine); color: #fff; font-size: 12px; font-weight: 600; padding: 2px 0; }
+.plan-date b { display: block; font-family: var(--font-sign); font-size: 17px; line-height: 1.15; padding: 4px 2px; }
+.plan-card.past .plan-date { border-color: #9aa39c; }
+.plan-card.past .plan-date span { background: #9aa39c; }
+.plan-body h4 { font-family: var(--font-sign); font-size: 20px; margin: 0 0 2px; line-height: 1.15; }
+.plan-trails { margin-top: 8px; align-items: center; }
+.rsvp { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 6px; margin-top: 10px; }
+.rsvp-btn {
+  border: 1px solid var(--line); background: #fff; border-radius: var(--radius-s); padding: 7px 4px;
+  font-weight: 600; font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.rsvp-btn b { font-weight: 700; margin-left: 2px; }
+.rsvp-btn.going.on { background: var(--easy); border-color: var(--easy); color: #fff; }
+.rsvp-btn.maybe.on { background: var(--marker); border-color: #c9a92f; color: var(--marker-ink); }
+.rsvp-btn.out.on { background: #6c7570; border-color: #6c7570; color: #fff; }
+.who { margin-top: 8px; display: grid; gap: 2px; }
+.who-label { font-weight: 600; }
+.plan-actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 10px; font-size: 13px; }
+.logged { color: var(--easy); font-weight: 600; }
+.log-slot .card { margin-top: 10px; }
+.trail-checks { display: grid; max-height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius-s); background: #fff; margin-top: 6px; }
+.trail-checks label {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 7px 10px;
+  border-bottom: 1px solid var(--line); color: var(--ink); font-weight: 500; font-size: 14px; cursor: pointer;
+}
+.trail-checks label:last-child { border-bottom: 0; }
+.meet-flag {
+  display: inline-block; background: var(--pine); color: #fff; font-weight: 700; font-size: 12px; padding: 4px 9px;
+  border-radius: 4px; border: 2px solid var(--marker); white-space: nowrap; position: relative;
+}
+.meet-flag::after {
+  content: ""; position: absolute; left: 50%; bottom: -8px; margin-left: -5px;
+  border: 5px solid transparent; border-top-color: var(--marker);
+}
+
+/* ---------- Offline download ---------- */
+.progress { height: 8px; background: #dfe4db; border-radius: 4px; overflow: hidden; }
+#off-bar { height: 100%; width: 0; background: var(--easy); transition: width .2s; }
+.lbl-short { display: none; }
+@media (max-width: 760px) {
+  .lbl-long { display: none; }
+  .lbl-short { display: inline; }
+  .map-actions { gap: 6px; }
+}

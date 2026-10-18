@@ -152,6 +152,25 @@ app.get('/api/config', (req, res) => res.json({ appName: APP_NAME }));
 
 // Static assets (JS/CSS) are not sensitive; all data goes through the protected API.
 app.use('/static', express.static(path.join(__dirname, 'public', 'static'), { maxAge: '1h' }));
+// Offline support: service worker, app manifest and icons (no data in these)
+app.get('/sw.js', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.sendFile(path.join(__dirname, 'public', 'sw.js'));
+});
+app.get('/manifest.webmanifest', (req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json');
+  res.json({
+    name: APP_NAME, short_name: APP_NAME.length > 14 ? APP_NAME.split(' ').map((w) => w[0]).join('').slice(0, 6) : APP_NAME,
+    start_url: '/', scope: '/', display: 'standalone', background_color: '#24302b', theme_color: '#24302b',
+    icons: [
+      { src: '/static/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { src: '/static/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+      { src: '/static/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ],
+  });
+});
+
 // Map libraries are served from node_modules so the app doesn't depend on outside CDNs.
 const vendor = (p) => express.static(path.join(__dirname, 'node_modules', p), { maxAge: '7d' });
 app.use('/vendor/leaflet', vendor('leaflet/dist'));
@@ -390,7 +409,8 @@ app.get('/api/trails/:id/gpx', wrap(async (req, res) => {
   const fname = rows[0].name.replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '') || 'trail';
   res.setHeader('Content-Type', 'application/gpx+xml');
   res.setHeader('Content-Disposition', `attachment; filename="${fname}.gpx"`);
-  res.send(toGpx([rows[0]], APP_NAME));
+  const wps = await q('SELECT name, kind, notes, lat, lng FROM waypoints WHERE trail_id=$1 ORDER BY name', [rows[0].id]);
+  res.send(toGpx([rows[0]], APP_NAME, wps.rows));
 }));
 
 // ----- Rides -----
@@ -481,6 +501,7 @@ app.get('/api/stats', wrap(async (req, res) => {
 app.get('/api/export/geojson', wrap(async (req, res) => {
   const trails = await q('SELECT * FROM trails ORDER BY id');
   const rides = await q(`SELECT trail_id, to_char(ride_date,'YYYY-MM-DD') AS ride_date, riders, conditions, notes FROM rides ORDER BY ride_date`);
+  const wps = await q('SELECT name, kind, notes, lat, lng, trail_id FROM waypoints ORDER BY id');
   const byTrail = {};
   for (const r of rides.rows) (byTrail[r.trail_id] = byTrail[r.trail_id] || []).push(r);
   const fc = {
@@ -495,6 +516,13 @@ app.get('/api/export/geojson', wrap(async (req, res) => {
         distance_mi: t.distance_mi === null ? null : Number(t.distance_mi), elevation_gain_ft: t.elevation_gain_ft,
         rides: (byTrail[t.id] || []).map(({ trail_id, ...r }) => r),
       },
+    })).concat(wps.rows.map((w) => {
+      const t = trails.rows.find((x) => x.id === w.trail_id);
+      return {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [w.lng, w.lat] },
+        properties: { waypoint: true, name: w.name, kind: w.kind, notes: w.notes, trail: t ? t.name : null },
+      };
     })),
   };
   res.setHeader('Content-Disposition', `attachment; filename="trails-backup-${new Date().toISOString().slice(0, 10)}.geojson"`);
@@ -503,9 +531,174 @@ app.get('/api/export/geojson', wrap(async (req, res) => {
 
 app.get('/api/export/gpx', wrap(async (req, res) => {
   const { rows } = await q('SELECT * FROM trails ORDER BY name');
+  const wps = await q('SELECT name, kind, notes, lat, lng FROM waypoints ORDER BY name');
   res.setHeader('Content-Type', 'application/gpx+xml');
   res.setHeader('Content-Disposition', 'attachment; filename="all-trails.gpx"');
-  res.send(toGpx(rows, APP_NAME));
+  res.send(toGpx(rows, APP_NAME, wps.rows));
+}));
+
+
+// ----- Waypoints -----
+const WAYPOINT_KINDS = ['gas', 'camp', 'water', 'hazard', 'view', 'trailhead', 'food', 'other'];
+function cleanWaypoint(b) {
+  const lat = Number(b.lat); const lng = Number(b.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    throw Object.assign(new Error('Waypoint needs a location'), { status: 400 });
+  }
+  const name = String(b.name || '').trim().slice(0, 100);
+  if (!name) throw Object.assign(new Error('Waypoint name is required'), { status: 400 });
+  return {
+    name,
+    kind: WAYPOINT_KINDS.includes(b.kind) ? b.kind : 'other',
+    notes: b.notes ? String(b.notes).trim().slice(0, 3000) : null,
+    lat: Math.round(lat * 1e6) / 1e6,
+    lng: Math.round(lng * 1e6) / 1e6,
+    trail_id: b.trail_id ? Number(b.trail_id) || null : null,
+  };
+}
+const WAYPOINT_SQL = `SELECT w.id, w.name, w.kind, w.notes, w.lat, w.lng, w.trail_id, w.created_at, w.updated_at,
+  u.display_name AS created_by_name FROM waypoints w LEFT JOIN users u ON u.id = w.created_by`;
+
+app.get('/api/waypoints', wrap(async (req, res) => {
+  const { rows } = await q(WAYPOINT_SQL + ' ORDER BY w.name');
+  res.json(rows);
+}));
+
+app.post('/api/waypoints', wrap(async (req, res) => {
+  // Accepts one waypoint, or { waypoints: [...] } for a GPX import
+  const list = Array.isArray(req.body.waypoints) ? req.body.waypoints.slice(0, 500) : [req.body];
+  const ids = [];
+  for (const raw of list) {
+    const w = cleanWaypoint(raw);
+    const { rows } = await q(
+      'INSERT INTO waypoints (name, kind, notes, lat, lng, trail_id, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+      [w.name, w.kind, w.notes, w.lat, w.lng, w.trail_id, req.session.user.id]);
+    ids.push(rows[0].id);
+  }
+  res.json(Array.isArray(req.body.waypoints) ? { ids } : { id: ids[0] });
+}));
+
+app.put('/api/waypoints/:id', wrap(async (req, res) => {
+  const w = cleanWaypoint(req.body);
+  const r = await q('UPDATE waypoints SET name=$1, kind=$2, notes=$3, lat=$4, lng=$5, trail_id=$6, updated_at=now() WHERE id=$7',
+    [w.name, w.kind, w.notes, w.lat, w.lng, w.trail_id, Number(req.params.id)]);
+  if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+}));
+
+app.delete('/api/waypoints/:id', wrap(async (req, res) => {
+  await q('DELETE FROM waypoints WHERE id=$1', [Number(req.params.id)]);
+  res.json({ ok: true });
+}));
+
+// ----- Planned rides & sign-ups -----
+function cleanPlanned(b) {
+  const title = String(b.title || '').trim().slice(0, 120);
+  if (!title) throw Object.assign(new Error('Give the ride a name'), { status: 400 });
+  const date = String(b.ride_date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw Object.assign(new Error('Pick a date'), { status: 400 });
+  const lat = Number(b.meet_lat); const lng = Number(b.meet_lng);
+  const hasLoc = b.meet_lat !== null && b.meet_lat !== '' && b.meet_lat !== undefined && Number.isFinite(lat) && Number.isFinite(lng);
+  return {
+    title, date,
+    meet_time: b.meet_time ? String(b.meet_time).slice(0, 20) : null,
+    meet_place: b.meet_place ? String(b.meet_place).trim().slice(0, 200) : null,
+    meet_lat: hasLoc ? lat : null,
+    meet_lng: hasLoc ? lng : null,
+    trail_ids: Array.isArray(b.trail_ids) ? b.trail_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 30) : [],
+    notes: b.notes ? String(b.notes).trim().slice(0, 5000) : null,
+  };
+}
+
+app.get('/api/planned', wrap(async (req, res) => {
+  const { rows } = await q(`
+    SELECT p.id, p.title, to_char(p.ride_date,'YYYY-MM-DD') AS ride_date, p.meet_time, p.meet_place, p.meet_lat, p.meet_lng,
+           p.trail_ids, p.notes, p.logged, p.created_at, u.display_name AS created_by_name,
+           COALESCE((SELECT json_agg(json_build_object('user_id', s.user_id, 'name', su.display_name, 'status', s.status, 'note', s.note)
+                     ORDER BY su.display_name)
+                     FROM ride_signups s JOIN users su ON su.id = s.user_id WHERE s.planned_ride_id = p.id), '[]') AS signups
+    FROM planned_rides p LEFT JOIN users u ON u.id = p.created_by
+    WHERE p.ride_date >= CURRENT_DATE - INTERVAL '120 days'
+    ORDER BY p.ride_date, p.id`);
+  res.json(rows);
+}));
+
+app.post('/api/planned', wrap(async (req, res) => {
+  const p = cleanPlanned(req.body);
+  const { rows } = await q(
+    `INSERT INTO planned_rides (title, ride_date, meet_time, meet_place, meet_lat, meet_lng, trail_ids, notes, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+    [p.title, p.date, p.meet_time, p.meet_place, p.meet_lat, p.meet_lng, p.trail_ids, p.notes, req.session.user.id]);
+  // The organizer is going by default
+  await q(`INSERT INTO ride_signups (planned_ride_id, user_id, status) VALUES ($1,$2,'going') ON CONFLICT DO NOTHING`,
+    [rows[0].id, req.session.user.id]);
+  res.json({ id: rows[0].id });
+}));
+
+app.put('/api/planned/:id', wrap(async (req, res) => {
+  const p = cleanPlanned(req.body);
+  const r = await q(
+    `UPDATE planned_rides SET title=$1, ride_date=$2, meet_time=$3, meet_place=$4, meet_lat=$5, meet_lng=$6, trail_ids=$7, notes=$8 WHERE id=$9`,
+    [p.title, p.date, p.meet_time, p.meet_place, p.meet_lat, p.meet_lng, p.trail_ids, p.notes, Number(req.params.id)]);
+  if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+}));
+
+app.delete('/api/planned/:id', wrap(async (req, res) => {
+  await q('DELETE FROM planned_rides WHERE id=$1', [Number(req.params.id)]);
+  res.json({ ok: true });
+}));
+
+app.post('/api/planned/:id/signup', wrap(async (req, res) => {
+  const status = ['going', 'maybe', 'out'].includes(req.body.status) ? req.body.status : null;
+  const id = Number(req.params.id);
+  if (!status) {
+    await q('DELETE FROM ride_signups WHERE planned_ride_id=$1 AND user_id=$2', [id, req.session.user.id]);
+  } else {
+    await q(`INSERT INTO ride_signups (planned_ride_id, user_id, status, note) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (planned_ride_id, user_id) DO UPDATE SET status=EXCLUDED.status, note=EXCLUDED.note, updated_at=now()`,
+      [id, req.session.user.id, status, req.body.note ? String(req.body.note).slice(0, 200) : null]);
+  }
+  res.json({ ok: true });
+}));
+
+// Turn a finished planned ride into ride-log entries on each of its trails
+app.post('/api/planned/:id/log', wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  const { rows } = await q(`SELECT *, to_char(ride_date,'YYYY-MM-DD') AS d FROM planned_rides WHERE id=$1`, [id]);
+  const p = rows[0];
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  const riders = Array.isArray(req.body.riders) ? req.body.riders.map((r) => String(r).trim().slice(0, 60)).filter(Boolean) : [];
+  const trailIds = Array.isArray(req.body.trail_ids) ? req.body.trail_ids.map(Number) : p.trail_ids;
+  let n = 0;
+  for (const tid of trailIds) {
+    const ok = await q('SELECT 1 FROM trails WHERE id=$1', [tid]);
+    if (!ok.rowCount) continue;
+    await insertRide(tid, { ride_date: p.d, riders, conditions: req.body.conditions, notes: req.body.notes || p.title }, req.session.user.id);
+    n++;
+  }
+  await q('UPDATE planned_rides SET logged=TRUE WHERE id=$1', [id]);
+  res.json({ ok: true, logged: n });
+}));
+
+// ----- Offline map tiles -----
+// Tiles for offline use are downloaded through here so the browser can store them.
+// Only USGS (public domain) maps are offered; other providers don't allow bulk downloads.
+const TILE_SOURCES = {
+  'usgs-topo': 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile',
+  'usgs-imagery': 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile',
+};
+app.get('/tiles/:layer/:z/:y/:x', wrap(async (req, res) => {
+  const base = TILE_SOURCES[req.params.layer];
+  const z = Number(req.params.z); const y = Number(req.params.y); const x = Number(req.params.x);
+  if (!base || ![z, y, x].every(Number.isInteger) || z < 0 || z > 16 || x < 0 || y < 0 || x >= 2 ** z || y >= 2 ** z) {
+    return res.status(400).send('Bad tile');
+  }
+  const r = await fetch(`${base}/${z}/${y}/${x}`, { headers: { 'User-Agent': `${APP_NAME} trail map (offline tile cache)` } });
+  if (!r.ok) return res.status(r.status === 404 ? 404 : 502).send('Tile unavailable');
+  res.setHeader('Content-Type', r.headers.get('content-type') || 'image/jpeg');
+  res.setHeader('Cache-Control', 'private, max-age=604800');
+  res.send(Buffer.from(await r.arrayBuffer()));
 }));
 
 // ---------- Errors ----------

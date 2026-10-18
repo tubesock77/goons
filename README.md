@@ -10,6 +10,12 @@ A private map and ride log for our riding group. Every trail we've ridden lives 
 - **Ride log.** Log each time the group rides a trail: date, who went (members plus guests), conditions and notes. A GPX upload fills in the ride date from the recording.
 - **Photos** on every trail. They're shrunk in the browser before upload, so phone photos upload quickly.
 - **Search and filters** by name, area, difficulty, state or rider. Sort by name, last ridden, length, most ridden or rating.
+- **Colored sections.** Split a trail into sections and give each its own color and label, like "Sandy wash" or "Rocky climb".
+- **Waypoints.** Gas, camping, water, hazards, viewpoints, trailheads and food. Tap the map or use your phone's GPS to drop one. Each waypoint gets notes and a Directions link, and waypoints inside GPX files are imported automatically.
+- **Ridden filter.** Show all trails, only ridden ones, not ridden yet, ridden by me or not ridden by me. Unridden trails are drawn dotted.
+- **Planned rides.** The Rides tab holds the date, meeting time and place (with a pin on the map) and the trails. Everyone taps Going, Maybe or Can't make it. After the ride, **Log this ride** adds it to every trail for everyone who went. The tab shows a badge when a ride needs your answer.
+- **Offline maps.** Account → Offline maps saves the area on screen (USGS topo or USGS satellite) to the device, and the site then opens with no signal. On phones, add the site to your home screen first.
+- **State lines.** State outlines, with the states you've ridden shaded and listed on the Stats tab.
 - **Group stats.** Totals, a per-rider leaderboard and a year-by-year breakdown.
 - **Map layers.** Topo, USGS topo, satellite, streets, plus an optional overlay of known trails from OpenStreetMap. There's also a "show my location" button.
 - **Exports.** GPX for any trail or for all trails (load them into onX or Gaia for offline use), plus a full GeoJSON backup with rides and notes.
