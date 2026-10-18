@@ -201,10 +201,37 @@
   map.on('zoomend', updateLabelZoom);
   updateLabelZoom();
 
+  // ----- Forest Service and BLM layers drawn by their own map servers -----
+  const ArcGISExport = L.TileLayer.extend({
+    initialize(base, params, options) {
+      this._base = base;
+      this._params = params;
+      L.TileLayer.prototype.initialize.call(this, '', options);
+    },
+    getTileUrl(coords) {
+      const b = this._tileCoordsToBounds(coords);
+      const sw = L.CRS.EPSG3857.project(b.getSouthWest());
+      const ne = L.CRS.EPSG3857.project(b.getNorthEast());
+      const size = this.getTileSize();
+      const p = new URLSearchParams({
+        bbox: `${sw.x},${sw.y},${ne.x},${ne.y}`, bboxSR: '3857', imageSR: '3857', size: `${size.x},${size.y}`,
+        dpi: '96', format: 'png32', transparent: 'true', f: 'image', ...this._params,
+      });
+      return `${this._base}/export?${p}`;
+    },
+  });
+  const mvumLayer = new ArcGISExport('https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_MVUM_01/MapServer',
+    { layers: 'show:1,2' }, { tileSize: 512, zoomOffset: -1, minZoom: 10, maxZoom: 19, opacity: 0.9, attribution: 'Routes: USDA Forest Service MVUM' });
+  const blmLayer = new ArcGISExport('https://gis.blm.gov/arcgis/rest/services/transportation/BLM_Natl_GTLF/MapServer',
+    { layers: 'show:0', layerDefs: JSON.stringify({ 0: "PLAN_MODE_TRNSPRT='Motorized' AND PLAN_OHV_ROUTE_DSGNTN IN ('Open','Limited')" }) },
+    { tileSize: 512, zoomOffset: -1, minZoom: 10, maxZoom: 19, opacity: 0.9, attribution: 'Routes: Bureau of Land Management' });
+
   const waypointLayer = L.layerGroup();
   const overlays = {
     'Waypoints': waypointLayer,
     'State lines': stateLayer,
+    'Forest Service routes (MVUM)': mvumLayer,
+    'BLM motorized routes': blmLayer,
     'Known trails (OSM)': L.tileLayer('https://tile.waymarkedtrails.org/mtb/{z}/{x}/{y}.png', {
       maxZoom: 18, opacity: 0.8, attribution: 'Trails: © waymarkedtrails.org',
     }),
@@ -212,7 +239,7 @@
   const savedBase = store.get('basemap');
   (bases[savedBase] || bases.Topo).addTo(map);
   // Remember which overlays are on or off; new overlays start with their default
-  const OVERLAY_DEFAULTS = { 'Waypoints': true, 'State lines': true, 'Known trails (OSM)': false };
+  const OVERLAY_DEFAULTS = { 'Waypoints': true, 'State lines': true, 'Forest Service routes (MVUM)': true, 'BLM motorized routes': true, 'Known trails (OSM)': false };
   let overlayPrefs;
   try { overlayPrefs = JSON.parse(store.get('overlays2')) || {}; } catch { overlayPrefs = {}; }
   Object.keys(overlays).forEach((name) => {
@@ -280,7 +307,7 @@
         lineCap: 'round', dashArray: unridden ? '1 9' : t.difficulty === 'Expert' ? '10 6' : null }));
       const hit = L.polyline(ll, { color: '#000', weight: 20, opacity: 0, pmIgnore: true });
       hit.bindTooltip(t.name, { sticky: true, className: 'trail-tip', direction: 'top', offset: [0, -8] });
-      hit.on('click', () => { if (!S.mode) openTrail(t.id); });
+      hit.on('click', (e) => { L.DomEvent.stopPropagation(e); if (!S.mode) openTrail(t.id); });
       hit.on('mouseover', () => { const el = $(`.trail-item[data-id="${t.id}"]`); if (el) el.classList.add('hover'); });
       hit.on('mouseout', () => { const el = $(`.trail-item[data-id="${t.id}"]`); if (el) el.classList.remove('hover'); });
       const g = L.featureGroup([casing, ...lines, hit]);
@@ -642,6 +669,7 @@
     closeForm();
     closeWaypointForm();
     clearPlanMarker();
+    if (b.dataset.view !== 'list') clearExplore();
     S.selectedId = null;
     S.selectedWp = null;
     drawWaypoints();
@@ -663,6 +691,8 @@
   function renderList() {
     S.view = 'list';
     setTab('list');
+    if (S.listMode === 'explore') return renderExplore();
+    clearExplore();
     if (S.listMode === 'waypoints') return renderWaypointList();
     const states = Array.from(new Set(S.trails.map((t) => t.state).filter(Boolean))).sort();
     const riders = allRiderNames();
@@ -854,7 +884,7 @@
         <button class="btn btn-secondary btn-small" id="copy-link">Copy link</button>
         <button class="btn btn-secondary btn-small" id="plan-here">Plan a ride here</button>
       </div>
-      <p class="byline">Added by ${esc(t.created_by_name || 'a former member')} on ${new Date(t.created_at).toLocaleDateString()}${t.updated_by_name && t.updated_at !== t.created_at ? ` · last edited by ${esc(t.updated_by_name)} ${new Date(t.updated_at).toLocaleDateString()}` : ''} · ${t.source === 'gpx' ? 'from a GPX recording' : 'drawn on the map'}</p>`;
+      <p class="byline">Added by ${esc(t.created_by_name || 'a former member')} on ${new Date(t.created_at).toLocaleDateString()}${t.updated_by_name && t.updated_at !== t.created_at ? ` · last edited by ${esc(t.updated_by_name)} ${new Date(t.updated_at).toLocaleDateString()}` : ''} · ${t.source === 'gpx' ? 'from a GPX recording' : t.source === 'import' ? 'from public trail data' : 'drawn on the map'}</p>`;
 
     $('#back').addEventListener('click', backToList);
     $('#edit').addEventListener('click', () => openForm({ ...t, existing: true }));
@@ -1588,6 +1618,7 @@
     return `<div class="seg" role="tablist" aria-label="Show trails or waypoints">
       <button type="button" data-mode="trails" class="${S.listMode === 'trails' ? 'on' : ''}">Trails <span class="muted">${S.trails.length}</span></button>
       <button type="button" data-mode="waypoints" class="${S.listMode === 'waypoints' ? 'on' : ''}">Waypoints <span class="muted">${S.waypoints.length}</span></button>
+      <button type="button" data-mode="explore" class="${S.listMode === 'explore' ? 'on' : ''}">Explore</button>
     </div>`;
   }
   function bindListModeSwitch() {
@@ -2231,6 +2262,197 @@
       toast(`Offline: switched to ${base}, which you saved on this device`);
     }
   }
+
+  // =====================================================================
+  // Explore public trail data: Forest Service + BLM layers, tap to identify, find trails here
+  // =====================================================================
+  const SOURCE_COLORS = { usfs: '#2e7d32', blm: '#b8860b', osm: '#5b6ee1' };
+  let exploreLayer = L.featureGroup().addTo(map);
+  let exploreHighlight = null;
+
+  function clearExplore() {
+    exploreLayer.clearLayers();
+    if (exploreHighlight) { map.removeLayer(exploreHighlight); exploreHighlight = null; }
+  }
+  function highlightResult(r, fit) {
+    if (exploreHighlight) map.removeLayer(exploreHighlight);
+    const ll = toLatLngs(r.geometry);
+    exploreHighlight = L.featureGroup([
+      L.polyline(ll, { color: '#fff', weight: 10, opacity: 0.95, interactive: false }),
+      L.polyline(ll, { color: SOURCE_COLORS[r.source], weight: 5, interactive: false }),
+    ]).addTo(map);
+    if (fit) fitGeometry(r.geometry);
+  }
+
+  const normName = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const alreadyAdded = (r) => S.trails.some((t) => normName(t.name) === normName(r.name));
+
+  function guessTrailType(r) {
+    const f = r.facts.join(' ').toLowerCase();
+    if (/single ?track|motorcycle|singletrack|path/.test(f) || r.kind === 'trail') return 'Single track';
+    if (/4wd|high clearance|jeep|utv|atv|track/.test(f)) return 'Two track / jeep road';
+    if (r.kind === 'road') return 'Dirt road';
+    return '';
+  }
+
+  // Add a public route as one of our trails (fetches every segment of it first)
+  async function addPublicRoute(r, near) {
+    let full = r;
+    if (r.source !== 'osm') {
+      toast('Getting the whole route…');
+      try {
+        const q = new URLSearchParams({ key: r.key });
+        if (near) { q.set('lat', near.lat); q.set('lng', near.lng); }
+        full = await api('GET', `/api/explore/route?${q}`);
+      } catch { full = r; /* fall back to what we have */ }
+    }
+    map.closePopup();
+    clearExplore();
+    const center = L.latLngBounds(toLatLngs(full.geometry).flat()).getCenter();
+    openForm({
+      name: full.name,
+      geometry: full.geometry,
+      source: 'import',
+      trail_type: guessTrailType(full),
+      state: stateAt(center.lat, center.lng),
+      notes: `From ${full.sourceLabel} data.\n${full.facts.join('\n')}`,
+    });
+  }
+
+  function stateAt(lat, lng) {
+    const f = stateFeatures.find((x) => inGeom([lng, lat], x));
+    return f ? f.properties.abbr : '';
+  }
+
+  function resultCard(r, i) {
+    const added = alreadyAdded(r);
+    return `<li class="ex-item" data-i="${i}">
+      <span class="ex-swatch" style="background:${SOURCE_COLORS[r.source]}"></span>
+      <span class="ex-main">
+        <span class="t-name">${esc(r.name)}</span>
+        <span class="t-meta"><span class="src src-${r.source}">${esc(r.sourceLabel)}</span><span>${fmtMi(r.miles)} mi</span>${r.motorcycle === 'open' ? '<span class="moto-ok">Motorcycles OK</span>' : ''}</span>
+        <span class="ex-facts small muted">${esc(r.facts.slice(0, 2).join(' · '))}</span>
+      </span>
+      ${added ? '<span class="added small">On your map</span>' : `<button class="btn btn-secondary btn-small" data-add="${i}">Add</button>`}
+    </li>`;
+  }
+
+  function renderExplore() {
+    S.listMode = 'explore';
+    const st = S.explore || (S.explore = { results: null, status: null, sources: { usfs: true, blm: true, osm: true }, q: '', moto: false });
+    view.innerHTML = `
+      ${listModeSwitch()}
+      <p class="small muted" style="margin:0 0 10px">Search public trail data for the area on the map. Tap a result to see it, then <b>Add</b> it to your trails. The Forest Service and BLM layers in the layers menu show where motorcycles are legal; tap a route on them for details.</p>
+      <div class="ex-sources">
+        ${[['usfs', 'Forest Service'], ['blm', 'BLM'], ['osm', 'OpenStreetMap']].map(([k, l]) => `<label class="ex-src"><input type="checkbox" value="${k}" ${st.sources[k] ? 'checked' : ''}><span class="ex-dot" style="background:${SOURCE_COLORS[k]}"></span>${l}</label>`).join('')}
+      </div>
+      <button class="btn btn-primary btn-block" id="ex-go" style="margin-top:10px">Find trails in this map area</button>
+      <div id="ex-out" style="margin-top:12px"></div>`;
+    bindListModeSwitch();
+    $$('.ex-src input').forEach((i) => i.addEventListener('change', () => { st.sources[i.value] = i.checked; }));
+    $('#ex-go').addEventListener('click', runExplore);
+    if (st.results) drawExploreResults();
+  }
+
+  async function runExplore() {
+    const st = S.explore;
+    const sources = Object.keys(st.sources).filter((k) => st.sources[k]);
+    if (!sources.length) return toast('Pick at least one source', true);
+    const b = map.getBounds();
+    if (b.getEast() - b.getWest() > 0.8 || b.getNorth() - b.getSouth() > 0.6) {
+      return toast('Zoom in a bit more first. The search works on an area about 30 miles across or smaller.', true);
+    }
+    const btn = $('#ex-go');
+    btn.disabled = true;
+    btn.textContent = 'Searching…';
+    $('#ex-out').innerHTML = '<p class="muted">Asking the Forest Service, BLM and OpenStreetMap. This can take up to 30 seconds.</p>';
+    try {
+      const q = new URLSearchParams({ w: b.getWest(), s: b.getSouth(), e: b.getEast(), n: b.getNorth(), sources: sources.join(',') });
+      const data = await api('GET', `/api/explore/search?${q}`);
+      st.results = data.results;
+      st.status = data.status;
+      st.center = b.getCenter();
+    } catch (e) {
+      $('#ex-out').innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
+    }
+    if (S.listMode !== 'explore' || S.view !== 'list') return;
+    btn.disabled = false;
+    btn.textContent = 'Find trails in this map area';
+    if (st.results) drawExploreResults();
+  }
+
+  function drawExploreResults() {
+    const st = S.explore;
+    const out = $('#ex-out');
+    if (!out) return;
+    const failed = Object.entries(st.status || {}).filter(([, v]) => !v.ok);
+    const label = { usfs: 'Forest Service', blm: 'BLM', osm: 'OpenStreetMap' };
+    const list = st.results.filter((r) => (!st.q || r.name.toLowerCase().includes(st.q.toLowerCase())) && (!st.moto || r.motorcycle === 'open'));
+    out.innerHTML = `
+      ${failed.length ? `<p class="small" style="color:var(--danger)">${failed.map(([k, v]) => `${label[k]} didn't answer (${esc(v.error)}).`).join(' ')} Try again in a minute.</p>` : ''}
+      ${st.results.length ? `
+        <input class="search" id="ex-q" type="search" placeholder="Filter results by name" value="${esc(st.q)}">
+        <label class="small" style="display:flex;gap:6px;align-items:center;margin:8px 0"><input type="checkbox" id="ex-moto" ${st.moto ? 'checked' : ''}> Only routes marked open to motorcycles</label>
+        <div class="list-summary"><span>${list.length} of ${st.results.length} results</span><button class="link-btn" id="ex-clear">Clear from map</button></div>
+        <ul class="trail-list ex-list">${list.map((r) => resultCard(r, st.results.indexOf(r))).join('')}</ul>
+        <p class="small muted" style="margin-top:10px">Data: USDA Forest Service MVUM, Bureau of Land Management, © OpenStreetMap contributors. Always check local closures and the official MVUM before riding.</p>`
+      : '<div class="empty"><strong>Nothing found here</strong>Try a different area or zoom out a little.</div>'}`;
+    // draw results on the map
+    exploreLayer.clearLayers();
+    for (const r of list) {
+      const ll = toLatLngs(r.geometry);
+      const line = L.polyline(ll, { color: SOURCE_COLORS[r.source], weight: 3, opacity: 0.85, dashArray: '6 4' });
+      const hit = L.polyline(ll, { color: '#000', weight: 16, opacity: 0 });
+      hit.bindTooltip(`${r.name} (${r.sourceLabel})`, { sticky: true, className: 'trail-tip' });
+      hit.on('click', (e) => { L.DomEvent.stopPropagation(e); selectResult(st.results.indexOf(r), false); });
+      exploreLayer.addLayer(line); exploreLayer.addLayer(hit);
+    }
+    if (!st.results.length) return;
+    $('#ex-q').addEventListener('input', (e) => { st.q = e.target.value; drawExploreResults(); const el = $('#ex-q'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); });
+    $('#ex-moto').addEventListener('change', (e) => { st.moto = e.target.checked; drawExploreResults(); });
+    $('#ex-clear').addEventListener('click', () => { st.results = null; st.status = null; clearExplore(); renderExplore(); });
+    $$('.ex-item', out).forEach((li) => {
+      li.addEventListener('click', (e) => { if (!e.target.closest('[data-add]')) selectResult(Number(li.dataset.i), true); });
+    });
+    $$('[data-add]', out).forEach((b) => b.addEventListener('click', () => addPublicRoute(st.results[Number(b.dataset.add)], st.center)));
+  }
+
+  function selectResult(i, fit) {
+    const r = S.explore.results[i];
+    highlightResult(r, fit);
+    $$('.ex-item').forEach((li) => li.classList.toggle('on', Number(li.dataset.i) === i));
+    const li = $(`.ex-item[data-i="${i}"]`);
+    if (li && !fit) li.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  // Tap a Forest Service / BLM route to see what it is
+  map.on('click', async (e) => {
+    if (S.mode || S.form || S.wpForm) return;
+    const layers = [map.hasLayer(mvumLayer) && 'usfs', map.hasLayer(blmLayer) && 'blm'].filter(Boolean);
+    if (!layers.length || map.getZoom() < 10) return;
+    const b = map.getBounds(); const size = map.getSize();
+    const popup = L.popup({ className: 'ex-popup', maxWidth: 300 }).setLatLng(e.latlng).setContent('<p class="muted">Checking public routes…</p>').openOn(map);
+    try {
+      const q = new URLSearchParams({ lat: e.latlng.lat, lng: e.latlng.lng, w: b.getWest(), s: b.getSouth(), e: b.getEast(), n: b.getNorth(), width: size.x, height: size.y, layers: layers.join(',') });
+      const { results } = await api('GET', `/api/explore/identify?${q}`);
+      if (!results.length) { map.closePopup(popup); return; }
+      const r = results[0];
+      highlightResult(r, false);
+      const el = document.createElement('div');
+      el.innerHTML = `
+        <div class="ex-pop-src src src-${r.source}">${esc(r.sourceLabel)}</div>
+        <h4>${esc(r.name)}</h4>
+        <ul>${r.facts.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>
+        ${alreadyAdded(r) ? '<p class="added small">Already on your map</p>' : '<button class="btn btn-primary btn-small">Add to my trails</button>'}
+        ${results.length > 1 ? `<p class="small muted">${results.length - 1} more route${results.length > 2 ? 's' : ''} here. Zoom in to pick one.</p>` : ''}`;
+      const btn = el.querySelector('button');
+      if (btn) btn.addEventListener('click', () => addPublicRoute(r, e.latlng));
+      popup.setContent(el);
+      popup.on('remove', () => { if (exploreHighlight) { map.removeLayer(exploreHighlight); exploreHighlight = null; } });
+    } catch (err) {
+      popup.setContent(`<p class="small">${esc(err.message)}</p>`);
+    }
+  });
 
   // ---------- Start ----------
   async function start() {

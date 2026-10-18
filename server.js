@@ -350,7 +350,7 @@ app.post('/api/trails', wrap(async (req, res) => {
   const geom = validateGeometry(req.body.geometry);
   if (!geom) return res.status(400).json({ error: 'Trail needs a line with at least 2 points' });
   const s = computeStats(geom);
-  const source = req.body.source === 'gpx' ? 'gpx' : 'drawn';
+  const source = ['gpx', 'import'].includes(req.body.source) ? req.body.source : 'drawn';
   const uid = req.session.user.id;
   const { rows } = await q(
     `INSERT INTO trails (name, area, state, difficulty, trail_type, rating, color, notes, geometry, source,
@@ -679,6 +679,248 @@ app.post('/api/planned/:id/log', wrap(async (req, res) => {
   }
   await q('UPDATE planned_rides SET logged=TRUE WHERE id=$1', [id]);
   res.json({ ok: true, logged: n });
+}));
+
+
+// ----- Explore public trail data (Forest Service MVUM, BLM, OpenStreetMap) -----
+const USFS_MVUM = process.env.EXPLORE_USFS_URL || 'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_MVUM_01/MapServer';
+const BLM_GTLF = process.env.EXPLORE_BLM_URL || 'https://gis.blm.gov/arcgis/rest/services/transportation/BLM_Natl_GTLF/MapServer';
+const BLM_WHERE = "PLAN_MODE_TRNSPRT='Motorized' AND PLAN_OHV_ROUTE_DSGNTN IN ('Open','Limited')";
+const OVERPASS = process.env.EXPLORE_OVERPASS_URL ? [process.env.EXPLORE_OVERPASS_URL] : ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+const UA = `${APP_NAME} (private trail log for a small riding group)`;
+const USFS_FIELDS = 'id,name,forestname,districtname,securityid,motorcycle,motorcycle_datesopen,seasonal,trailclass,trailsystem,mvum_symbol_name,gis_miles,symbol';
+const BLM_FIELDS = 'ROUTE_PRMRY_NM,ROUTE_SCNDRY_SPCL_DSGNTN_NM,OBSRVE_ROUTE_USE_CLASS,OBSRVE_SRFCE_TYPE,PLAN_OHV_ROUTE_DSGNTN,PLAN_ASSET_CLASS,ADMIN_ST,GIS_MILES';
+
+async function fetchJson(url, opts = {}, ms = 20000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: ctl.signal, headers: { 'User-Agent': UA, ...(opts.headers || {}) } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+const r5 = (n) => Math.round(n * 1e5) / 1e5;
+const cleanLines = (lines) => lines.map((l) => l.map((c) => [r5(c[0]), r5(c[1])])).filter((l) => l.length >= 2);
+function linesFromGeoJson(g) {
+  if (!g) return [];
+  if (g.type === 'LineString') return [g.coordinates];
+  if (g.type === 'MultiLineString') return g.coordinates;
+  return [];
+}
+const lineMi = (l) => l.reduce((s, c, i) => (i ? s + require('./lib/geo').haversineMi(l[i - 1], c) : 0), 0);
+const isOpen = (v) => v && String(v).trim() && !/^(no|n|closed|null)$/i.test(String(v).trim());
+const titleCase = (s) => String(s || '').toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase()).trim();
+
+function arcgisQueryUrl(base, layer, where, envelope, fields, extra = '') {
+  const p = new URLSearchParams({
+    where, outFields: fields, returnGeometry: 'true', outSR: '4326', f: 'geojson',
+    geometryType: 'esriGeometryEnvelope', inSR: '4326', spatialRel: 'esriSpatialRelIntersects',
+    maxAllowableOffset: '0.00003', resultRecordCount: '1500',
+  });
+  if (envelope) p.set('geometry', envelope.join(','));
+  return `${base}/${layer}/query?${p.toString()}${extra}`;
+}
+
+function usfsResult(groupKey, feats) {
+  const a = feats[0].properties;
+  const lines = cleanLines(feats.flatMap((f) => linesFromGeoJson(f.geometry)));
+  const nm = a.name && a.name.trim() ? titleCase(a.name) : `Forest Service ${a.layerKind === 'road' ? 'road' : 'trail'} ${a.id || ''}`.trim();
+  const facts = [
+    a.mvum_symbol_name,
+    isOpen(a.motorcycle) ? `Motorcycles: open${a.motorcycle_datesopen ? ` ${a.motorcycle_datesopen}` : ''}` : 'Motorcycles: check the MVUM',
+    a.forestname ? `${titleCase(a.forestname)}${a.districtname ? `, ${titleCase(a.districtname)}` : ''}` : null,
+    a.id ? `Route number ${a.id}` : null,
+  ].filter(Boolean);
+  return {
+    key: `usfs:${groupKey}`, source: 'usfs', sourceLabel: 'Forest Service', kind: a.layerKind,
+    name: nm, ref: a.id || null, motorcycle: isOpen(a.motorcycle) ? 'open' : 'unknown',
+    seasonal: a.motorcycle_datesopen || null, facts,
+    geometry: { type: 'MultiLineString', coordinates: lines },
+    miles: Math.round(lines.reduce((s, l) => s + lineMi(l), 0) * 10) / 10,
+  };
+}
+
+function blmResult(groupKey, feats) {
+  const a = feats[0].properties;
+  const lines = cleanLines(feats.flatMap((f) => linesFromGeoJson(f.geometry)));
+  const facts = [
+    a.PLAN_OHV_ROUTE_DSGNTN ? `OHV designation: ${a.PLAN_OHV_ROUTE_DSGNTN}` : null,
+    a.OBSRVE_ROUTE_USE_CLASS ? `Route type: ${a.OBSRVE_ROUTE_USE_CLASS}` : null,
+    a.OBSRVE_SRFCE_TYPE ? `Surface: ${a.OBSRVE_SRFCE_TYPE}` : null,
+    a.ROUTE_SCNDRY_SPCL_DSGNTN_NM ? a.ROUTE_SCNDRY_SPCL_DSGNTN_NM : null,
+    a.ADMIN_ST ? `BLM ${a.ADMIN_ST}` : null,
+  ].filter(Boolean);
+  return {
+    key: `blm:${groupKey}`, source: 'blm', sourceLabel: 'BLM', kind: 'route',
+    name: a.ROUTE_PRMRY_NM ? String(a.ROUTE_PRMRY_NM).trim() : 'BLM route', ref: null,
+    motorcycle: 'open', seasonal: null, facts,
+    geometry: { type: 'MultiLineString', coordinates: lines },
+    miles: Math.round(lines.reduce((s, l) => s + lineMi(l), 0) * 10) / 10,
+  };
+}
+
+function osmResult(name, ways) {
+  const lines = cleanLines(ways.map((w) => (w.geometry || []).map((g) => [g.lon, g.lat])));
+  const tags = ways[0].tags || {};
+  const pick = (k) => { const v = ways.map((w) => (w.tags || {})[k]).find(Boolean); return v || null; };
+  const hw = pick('highway');
+  const facts = [
+    hw === 'track' ? `Dirt track${pick('tracktype') ? ` (${pick('tracktype')})` : ''}` : hw === 'path' ? 'Trail / singletrack' : hw ? `Road (${hw})` : null,
+    pick('surface') ? `Surface: ${pick('surface')}` : null,
+    pick('motorcycle') ? `Motorcycles: ${pick('motorcycle')}` : null,
+    pick('ref') ? `Number ${pick('ref')}` : null,
+    pick('operator') ? pick('operator') : null,
+  ].filter(Boolean);
+  return {
+    key: `osm:${name.toLowerCase()}`, source: 'osm', sourceLabel: 'OpenStreetMap', kind: hw === 'path' ? 'trail' : 'road',
+    name, ref: tags.ref || null,
+    motorcycle: /^(yes|designated|permissive)$/.test(pick('motorcycle') || '') ? 'open' : 'unknown', seasonal: null, facts,
+    geometry: { type: 'MultiLineString', coordinates: lines },
+    miles: Math.round(lines.reduce((s, l) => s + lineMi(l), 0) * 10) / 10,
+  };
+}
+
+function group(features, keyFn) {
+  const m = new Map();
+  for (const f of features) {
+    const k = keyFn(f);
+    if (!k) continue;
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(f);
+  }
+  return m;
+}
+
+async function searchUsfs(env) {
+  const out = [];
+  for (const [layer, kind] of [[2, 'trail'], [1, 'road']]) {
+    const fc = await fetchJson(arcgisQueryUrl(USFS_MVUM, layer, '1=1', env, USFS_FIELDS));
+    const feats = (fc.features || []).map((f) => ({ ...f, properties: { ...f.properties, layerKind: kind } }));
+    // Roads: keep the named ones and anything open to motorcycles; unnamed numbered roads are too many to list
+    const keep = kind === 'trail' ? feats : feats.filter((f) => (f.properties.name || '').trim());
+    for (const [k, fs] of group(keep, (f) => `${kind}:${f.properties.securityid || ''}:${f.properties.id || f.properties.name}`)) out.push(usfsResult(k, fs));
+  }
+  return out;
+}
+
+async function searchBlm(env) {
+  const fc = await fetchJson(arcgisQueryUrl(BLM_GTLF, 0, `${BLM_WHERE} AND ROUTE_PRMRY_NM IS NOT NULL`, env, BLM_FIELDS));
+  const out = [];
+  for (const [k, fs] of group(fc.features || [], (f) => (f.properties.ROUTE_PRMRY_NM || '').trim().toLowerCase())) out.push(blmResult(k, fs));
+  return out;
+}
+
+async function searchOsm([w, s, e, n]) {
+  const bbox = `${s},${w},${n},${e}`;
+  const query = `[out:json][timeout:25];
+(
+  way["highway"~"^(track|path|unclassified)$"]["name"]["motorcycle"!~"^(no|private)$"]["access"!~"^(no|private)$"]["surface"!~"^(asphalt|paved|concrete)$"](${bbox});
+  way["highway"]["name"]["motorcycle"~"^(yes|designated|permissive)$"](${bbox});
+);
+out geom 1500;`;
+  let lastErr;
+  for (const url of OVERPASS) {
+    try {
+      const data = await fetchJson(url, { method: 'POST', body: new URLSearchParams({ data: query }), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, 30000);
+      const out = [];
+      for (const [k, ways] of group(data.elements || [], (el) => (el.tags && el.tags.name ? el.tags.name.trim() : null))) out.push(osmResult(k, ways));
+      return out;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
+function parseBbox(q) {
+  const v = ['w', 's', 'e', 'n'].map((k) => Number(q[k]));
+  if (!v.every(Number.isFinite) || v[0] >= v[2] || v[1] >= v[3]) throw Object.assign(new Error('Bad map area'), { status: 400 });
+  if (v[2] - v[0] > 0.8 || v[3] - v[1] > 0.6) throw Object.assign(new Error('Zoom in a bit more. The search area is too big.'), { status: 400 });
+  return v;
+}
+
+app.get('/api/explore/search', wrap(async (req, res) => {
+  const env = parseBbox(req.query);
+  const wanted = String(req.query.sources || 'usfs,blm,osm').split(',');
+  const jobs = { usfs: searchUsfs, blm: searchBlm, osm: searchOsm };
+  const status = {};
+  const results = [];
+  await Promise.all(Object.entries(jobs).filter(([k]) => wanted.includes(k)).map(async ([k, fn]) => {
+    try { const r = await fn(env); results.push(...r); status[k] = { ok: true, count: r.length }; }
+    catch (e) { status[k] = { ok: false, error: e.name === 'AbortError' ? 'timed out' : e.message }; console.warn(`explore ${k} failed:`, e.message); }
+  }));
+  results.forEach((r) => { r.miles = r.miles || 0; });
+  results.sort((a, b) => (a.source === b.source ? b.miles - a.miles : ['usfs', 'blm', 'osm'].indexOf(a.source) - ['usfs', 'blm', 'osm'].indexOf(b.source)));
+  res.json({ results: results.filter((r) => r.geometry.coordinates.length).slice(0, 300), status });
+}));
+
+// What's at a tapped spot on the Forest Service / BLM layers
+app.get('/api/explore/identify', wrap(async (req, res) => {
+  const lat = Number(req.query.lat); const lng = Number(req.query.lng);
+  const env = parseBbox(req.query.w ? req.query : { w: lng - 0.05, s: lat - 0.05, e: lng + 0.05, n: lat + 0.05 });
+  const width = Math.min(4000, Number(req.query.width) || 800); const height = Math.min(4000, Number(req.query.height) || 600);
+  const layers = String(req.query.layers || 'usfs,blm').split(',');
+  const common = {
+    geometry: `${lng},${lat}`, geometryType: 'esriGeometryPoint', sr: '4326', tolerance: '8',
+    mapExtent: env.join(','), imageDisplay: `${width},${height},96`, returnGeometry: 'true', maxAllowableOffset: '0.00003', f: 'json',
+    returnFieldName: 'true', returnUnformattedValues: 'true',
+  };
+  // Older servers answer with field aliases ("Forest Name"); map those back to field names
+  const USFS_ALIASES = { name: 'name', id: 'id', motorcycle: 'motorcycle', motorcycledatesopen: 'motorcycle_datesopen', motorcyledatesopen: 'motorcycle_datesopen',
+    forestname: 'forestname', rangerdistrictname: 'districtname', districtname: 'districtname', forestcode: 'securityid', securityid: 'securityid',
+    mvumsymbolname: 'mvum_symbol_name', gismiles: 'gis_miles', seasonal: 'seasonal', trailclass: 'trailclass', trailsystem: 'trailsystem' };
+  const normUsfs = (attrs) => {
+    const a = {};
+    for (const [k, v] of Object.entries(attrs || {})) {
+      const key = USFS_ALIASES[k.toLowerCase().replace(/[^a-z0-9]/g, '')] || k.toLowerCase();
+      a[key] = v === 'Null' || v === '' ? null : v;
+    }
+    return a;
+  };
+  const toLines = (g) => (g && g.paths ? g.paths : []);
+  const out = [];
+  await Promise.all([
+    layers.includes('usfs') && (async () => {
+      const p = new URLSearchParams({ ...common, layers: 'all:1,2' });
+      const r = await fetchJson(`${USFS_MVUM}/identify?${p}`).catch(() => ({ results: [] }));
+      for (const hit of (r.results || []).slice(0, 3)) {
+        const a = normUsfs(hit.attributes);
+        a.layerKind = hit.layerId === 1 ? 'road' : 'trail';
+        out.push(usfsResult(`${a.layerKind}:${a.securityid || ''}:${a.id || a.name}`, [{ properties: a, geometry: { type: 'MultiLineString', coordinates: toLines(hit.geometry) } }]));
+      }
+    })(),
+    layers.includes('blm') && (async () => {
+      const p = new URLSearchParams({ ...common, layers: 'all:0', layerDefs: JSON.stringify({ 0: BLM_WHERE }) });
+      const r = await fetchJson(`${BLM_GTLF}/identify?${p}`).catch(() => ({ results: [] }));
+      for (const hit of (r.results || []).slice(0, 3)) {
+        const a = Object.fromEntries(Object.entries(hit.attributes || {}).map(([k, v]) => [k.toUpperCase(), v === 'Null' ? null : v]));
+        out.push(blmResult(`${(a.ROUTE_PRMRY_NM || '').toLowerCase()}`, [{ properties: a, geometry: { type: 'MultiLineString', coordinates: toLines(hit.geometry) } }]));
+      }
+    })(),
+  ].filter(Boolean));
+  res.json({ results: out });
+}));
+
+// The complete line for a public route (all its segments), so it can be added as a trail
+app.get('/api/explore/route', wrap(async (req, res) => {
+  const { key } = req.query;
+  const lat = Number(req.query.lat); const lng = Number(req.query.lng);
+  const near = Number.isFinite(lat) && Number.isFinite(lng) ? [lng - 0.4, lat - 0.3, lng + 0.4, lat + 0.3] : null;
+  const esc1 = (v) => String(v).replace(/'/g, "''");
+  let m;
+  if ((m = /^usfs:(trail|road):([^:]*):(.+)$/.exec(key || ''))) {
+    const [, kind, forest, id] = m;
+    const where = `id='${esc1(id)}'${forest ? ` AND securityid='${esc1(forest)}'` : ''}`;
+    const fc = await fetchJson(arcgisQueryUrl(USFS_MVUM, kind === 'road' ? 1 : 2, where, null, USFS_FIELDS));
+    const feats = (fc.features || []).map((f) => ({ ...f, properties: { ...f.properties, layerKind: kind } }));
+    if (!feats.length) return res.status(404).json({ error: 'Route not found' });
+    return res.json(usfsResult(`${kind}:${forest}:${id}`, feats));
+  }
+  if ((m = /^blm:(.+)$/.exec(key || ''))) {
+    const fc = await fetchJson(arcgisQueryUrl(BLM_GTLF, 0, `${BLM_WHERE} AND LOWER(ROUTE_PRMRY_NM)='${esc1(m[1])}'`, near, BLM_FIELDS));
+    if (!(fc.features || []).length) return res.status(404).json({ error: 'Route not found' });
+    return res.json(blmResult(m[1], fc.features));
+  }
+  res.status(400).json({ error: 'Unknown route' });
 }));
 
 // ----- Offline map tiles -----
