@@ -1,0 +1,33 @@
+# Render Blueprint: creates the web app and its Postgres database in one step.
+# In Render: New + > Blueprint > pick this GitHub repo.
+databases:
+  - name: trail-log-db
+    plan: basic-256mb
+    databaseName: traillog
+
+services:
+  - type: web
+    name: trail-log
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: trail-log-db
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: APP_NAME
+        value: Trail Log
+      # You'll be asked for these when the Blueprint is created.
+      # They only create the first admin account, the first time the app starts.
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
