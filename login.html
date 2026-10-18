@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="sign-post" aria-hidden="true"></div>
+    <h1 id="app-name">Geriatric Goons Adventures</h1>
+    <p class="login-sub">Members only. Ask your group admin for an account.</p>
+    <form id="login-form" autocomplete="on">
+      <label>Username
+        <input name="username" autocomplete="username" autocapitalize="none" required>
+      </label>
+      <label>Password
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <p class="form-error" id="err" role="alert"></p>
+      <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+    </form>
+  </main>
+  <script>
+    fetch('/api/config').then(r => r.json()).then(c => {
+      document.getElementById('app-name').textContent = c.appName;
+      document.title = 'Sign in · ' + c.appName;
+    });
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const err = document.getElementById('err');
+      err.textContent = '';
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: f.get('username'), password: f.get('password') })
+      });
+      if (res.ok) location.href = '/';
+      else err.textContent = (await res.json()).error || 'Sign-in failed';
+    });
+  </script>
+</body>
+</html>

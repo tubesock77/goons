@@ -231,7 +231,7 @@ app.delete('/api/users/:id', requireAdmin, wrap(async (req, res) => {
 // ----- Trails -----
 const TRAIL_LIST_SQL = `
   SELECT t.id, t.name, t.area, t.state, t.difficulty, t.trail_type, t.rating, t.color, t.notes,
-         t.geometry, t.source, t.distance_mi::float AS distance_mi, t.elevation_gain_ft,
+         t.geometry, t.sections, t.source, t.distance_mi::float AS distance_mi, t.elevation_gain_ft,
          t.min_ele_ft, t.max_ele_ft, t.created_at, t.updated_at,
          cu.display_name AS created_by_name, uu.display_name AS updated_by_name,
          COALESCE(r.ride_count, 0)::int AS ride_count,
@@ -265,6 +265,19 @@ function cleanTrail(body) {
     color: body.color && /^#[0-9a-fA-F]{6}$/.test(body.color) ? body.color : null,
     notes: str(body.notes, 10000),
   };
+}
+
+function cleanSections(list, lineCount) {
+  const arr = Array.isArray(list) ? list : [];
+  const out = [];
+  for (let i = 0; i < lineCount; i++) {
+    const x = arr[i] || {};
+    out.push({
+      color: typeof x.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(x.color) ? x.color : null,
+      label: x.label ? String(x.label).trim().slice(0, 60) : null,
+    });
+  }
+  return out;
 }
 
 function validateGeometry(g) {
@@ -322,10 +335,10 @@ app.post('/api/trails', wrap(async (req, res) => {
   const uid = req.session.user.id;
   const { rows } = await q(
     `INSERT INTO trails (name, area, state, difficulty, trail_type, rating, color, notes, geometry, source,
-                         distance_mi, elevation_gain_ft, min_ele_ft, max_ele_ft, created_by, updated_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING id`,
+                         distance_mi, elevation_gain_ft, min_ele_ft, max_ele_ft, created_by, updated_by, sections)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$16) RETURNING id`,
     [t.name, t.area, t.state, t.difficulty, t.trail_type, t.rating, t.color, t.notes, geom, source,
-     s.distanceMi, s.gainFt, s.minFt, s.maxFt, uid]
+     s.distanceMi, s.gainFt, s.minFt, s.maxFt, uid, JSON.stringify(cleanSections(req.body.sections, geom.coordinates.length))]
   );
   const trailId = rows[0].id;
   // Optional first ride logged together with the trail
@@ -349,6 +362,16 @@ app.put('/api/trails/:id', wrap(async (req, res) => {
     params.push(geom, s.distanceMi, s.gainFt, s.minFt, s.maxFt);
     const n = params.length;
     sets.push(`geometry=$${n - 4}`, `distance_mi=$${n - 3}`, `elevation_gain_ft=$${n - 2}`, `min_ele_ft=$${n - 1}`, `max_ele_ft=$${n}`);
+  }
+  if (req.body.sections !== undefined) {
+    let lineCount;
+    if (req.body.geometry) lineCount = validateGeometry(req.body.geometry).coordinates.length;
+    else {
+      const cur = await q('SELECT jsonb_array_length(geometry->\'coordinates\') AS n FROM trails WHERE id=$1', [id]);
+      lineCount = cur.rows[0] ? cur.rows[0].n : 0;
+    }
+    params.push(JSON.stringify(cleanSections(req.body.sections, lineCount)));
+    sets.push(`sections=$${params.length}`);
   }
   params.push(id);
   const r = await q(`UPDATE trails SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
@@ -468,7 +491,7 @@ app.get('/api/export/geojson', wrap(async (req, res) => {
       geometry: t.geometry,
       properties: {
         name: t.name, area: t.area, state: t.state, difficulty: t.difficulty, trail_type: t.trail_type,
-        rating: t.rating, color: t.color, notes: t.notes, source: t.source,
+        rating: t.rating, color: t.color, notes: t.notes, source: t.source, sections: t.sections,
         distance_mi: t.distance_mi === null ? null : Number(t.distance_mi), elevation_gain_ft: t.elevation_gain_ft,
         rides: (byTrail[t.id] || []).map(({ trail_id, ...r }) => r),
       },
