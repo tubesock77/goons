@@ -12,7 +12,7 @@ const { computeStats, toGpx } = require('./lib/geo');
 
 const PORT = process.env.PORT || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
-const APP_NAME = process.env.APP_NAME || 'Trail Log';
+const APP_NAME = process.env.APP_NAME || 'Geriatric Goons Adventures';
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is not set.');
@@ -58,7 +58,7 @@ app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin'); // map tile servers require a referrer
   next();
 });
 
@@ -493,7 +493,20 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: status >= 500 ? 'Server error' : err.message });
 });
 
-init()
+// The database can still be starting when the app boots (e.g. on a first deploy), so retry for ~2 minutes.
+async function initWithRetry(attempt = 1) {
+  try {
+    await init();
+  } catch (e) {
+    const retryable = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', '57P03'].includes(e.code);
+    if (!retryable || attempt >= 24) throw e;
+    console.log(`Database not ready (${e.code}); retrying in 5s (attempt ${attempt} of 24)…`);
+    await new Promise((r) => setTimeout(r, 5000));
+    return initWithRetry(attempt + 1);
+  }
+}
+
+initWithRetry()
   .then(() => app.listen(PORT, () => console.log(`${APP_NAME} running on port ${PORT}`)))
   .catch((e) => {
     console.error('Startup failed:', e);

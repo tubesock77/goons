@@ -24,7 +24,7 @@ services:
       - key: SESSION_SECRET
         generateValue: true
       - key: APP_NAME
-        value: Trail Log
+        value: Geriatric Goons Adventures
       # You'll be asked for these when the Blueprint is created.
       # They only create the first admin account, the first time the app starts.
       - key: ADMIN_USERNAME
